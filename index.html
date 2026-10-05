@@ -72,7 +72,8 @@ input:focus-visible, select:focus-visible, button:focus-visible, .drop:focus-vis
 .batchbar .btn.ghost { color: var(--navy-fg); border-color: color-mix(in srgb, var(--navy-fg) 50%, transparent); }
 
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
-.card.example { border-style: dashed; }
+.empty { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); padding: 28px 20px; display: grid; gap: 4px; justify-items: center; text-align: center; color: var(--muted); }
+.empty b { color: var(--fg); font-family: var(--display); font-size: 1.05rem; }
 .card-head { padding: 16px 18px; display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .card-head .id { display: grid; gap: 8px; flex: 1 1 320px; min-width: 0; }
 .card-head .id .row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 0.8fr); gap: 10px; }
@@ -129,7 +130,7 @@ tfoot td { font-weight: 600; background: var(--surface-2); border-bottom: none; 
     <div class="steps">
       <div class="step"><span class="n">1</span><div><b>Drop the exports</b>One file per facility, any number at once.</div></div>
       <div class="step"><span class="n">2</span><div><b>Check the counts</b>Plans are grouped by coverage limit. Review any flags.</div></div>
-      <div class="step"><span class="n">3</span><div><b>Download the forms</b>Download one form, or every facility as a single .zip.</div></div>
+      <div class="step"><span class="n">3</span><div><b>Download the forms</b>Each form includes a Tenant Detail tab with the original report.</div></div>
     </div>
   </header>
 
@@ -172,7 +173,8 @@ tfoot td { font-weight: 600; background: var(--surface-2); border-bottom: none; 
       <li>Every protection charge counts as one plan at the limit shown in the fee name, such as <span class="num">Content Protection - 2 - $5,000</span> → the $5,000 row. Facilities charge tenants different prices, so the price is ignored. Only the limit decides the row.</li>
       <li>Fees naming an Accidental Damage Waiver go on the waiver row. Voided, reversed, or negative charges are skipped and listed under that facility.</li>
       <li>Premium and tax are not typed in. The form calculates them from its own locked rates (<span class="num" id="rate-note">1.02%/yr ÷ 12, 3.2% AZ surplus lines tax</span>). Only the facility, contact, month, plan counts, signature name and submission date are written into the form.</li>
-      <li>Files are read inside your browser and are not uploaded anywhere.</li>
+      <li>Each download adds a <b>Tenant Detail</b> tab with every row of the original report and the 1.02 row it was counted on, so each count can be traced back to a tenant and unit. The Reporting Worksheet and Example Report tabs are not changed.</li>
+      <li>Files are read inside your browser and are not uploaded anywhere. <b>Clear all</b> removes every loaded report from the page.</li>
     </ul>
   </section>
 </div>
@@ -295,11 +297,15 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     var counts = {}; Object.keys(LIMIT_ROWS).forEach(function (k) { counts[k] = 0; });
     var waiver = 0, collected = 0, skippedOther = 0;
     var issues = [], unpaid = [], seen = {}, dupes = [], monthTally = {};
+    // The original report, row for row, for the "Tenant Detail" tab of the download.
+    var width = 0; for (var w = 0; w < H.length; w++) if (norm(H[w])) width = w + 1;
+    var detail = { headers: H.slice(0, width).map(norm), rows: [] };
+    function keep(row, reportedAs) { detail.rows.push({ cells: row.slice(0, width), reportedAs: reportedAs }); }
 
     for (var i = hdrIdx + 1; i < rows.length; i++) {
-      var row = rows[i]; if (!row) continue;
+      var row = rows[i]; if (!row || !row.some(function (v) { return norm(v) !== ''; })) continue;
       var fee = norm(row[col.fee]);
-      if (!fee) continue;
+      if (!fee) { keep(row, 'Not counted · no fee name'); continue; }
       var unit = col.unit >= 0 ? norm(row[col.unit]) : '';
       var tenant = col.tenant >= 0 ? norm(row[col.tenant]) : '';
       var amt = col.amt >= 0 ? Number(row[col.amt]) : (col.total >= 0 ? Number(row[col.total]) : NaN);
@@ -309,19 +315,23 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
       var isWaiver = WAIVER_RE.test(fee);
       var limit = limitFromFee(fee);
-      if (!isWaiver && !(PLAN_RE.test(fee) && limit)) { skippedOther++; continue; }
+      if (!isWaiver && !(PLAN_RE.test(fee) && limit)) { skippedOther++; keep(row, 'Not counted · not a protection plan'); continue; }
 
       var who = (unit ? 'Unit ' + unit : 'Row ' + (i + 1)) + (tenant ? ' · ' + tenant : '');
       if (VOID_RE.test(status) || (isFinite(amt) && amt < 0)) {
         issues.push({ level: 'warn', text: who + ': skipped, charge is ' + (amt < 0 ? 'a credit (' + amt + ')' : '"' + status + '"') + '. Fee: ' + fee });
+        keep(row, 'Not counted · ' + (amt < 0 ? 'credit' : status.toLowerCase()));
         continue;
       }
       if (isWaiver) {
         waiver++;
+        keep(row, 'Accidental Damage Waiver');
       } else if (LIMIT_ROWS[limit]) {
         counts[limit]++;
+        keep(row, '$' + limit.toLocaleString('en-US'));
       } else {
         issues.push({ level: 'error', text: who + ': $' + limit.toLocaleString() + ' limit is not a row on the 1.02 form, so it was not counted. Fee: ' + fee });
+        keep(row, 'Not counted · $' + limit.toLocaleString('en-US') + ' is not on the form');
         continue;
       }
       if (isFinite(amt)) collected += amt;
@@ -339,7 +349,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
     var total = waiver; Object.keys(counts).forEach(function (k) { total += counts[k]; });
     if (!total) issues.push({ level: 'error', text: 'No protection plan charges were found in this file.' });
-    return { info: info, counts: counts, waiver: waiver, totalPlans: total, collected: collected, skippedOther: skippedOther, issues: issues };
+    return { info: info, counts: counts, waiver: waiver, totalPlans: total, collected: collected, skippedOther: skippedOther, issues: issues, detail: detail, sourceName: filename };
   }
 
   // ---------- Premium math (mirrors the template formulas) ----------
@@ -384,6 +394,88 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return xml.replace(re, '$1<v>' + (Math.round(value * 1e6) / 1e6) + '</v>');
   }
 
+  // ---------- "Tenant Detail" tab: the original report, appended as a new sheet ----------
+  // Only appends (a sheet part, its relationship, three styles); nothing existing is edited.
+  var DETAIL_SHEET = 'Tenant Detail';
+  var NOFOLDERS = { createFolders: false };
+  function colName(n) { var s = ''; n++; while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
+  function excelDate(d) { return (Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - Date.UTC(1899, 11, 30)) / 86400000; }
+
+  function appendStyles(stylesXml) {
+    function bump(tag, add) {
+      var start = stylesXml.indexOf('<' + tag + ' ') >= 0 ? stylesXml.indexOf('<' + tag + ' ') : stylesXml.indexOf('<' + tag + '>');
+      var count = +(stylesXml.slice(start).match(/count="(\d+)"/) || [0, 0])[1];
+      var close = stylesXml.indexOf('</' + tag + '>', start);
+      stylesXml = stylesXml.slice(0, close) + add.join('') + stylesXml.slice(close);
+      stylesXml = stylesXml.slice(0, start) + stylesXml.slice(start).replace(/count="\d+"/, 'count="' + (count + add.length) + '"');
+      return count;
+    }
+    var f = bump('fonts', ['<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Aptos Narrow"/><family val="2"/><scheme val="minor"/></font>',
+                           '<font><b/><sz val="11"/><color rgb="FF002060"/><name val="Aptos Narrow"/><family val="2"/><scheme val="minor"/></font>']);
+    var fl = bump('fills', ['<fill><patternFill patternType="solid"><fgColor rgb="FF002060"/><bgColor indexed="64"/></patternFill></fill>']);
+    var x = bump('cellXfs', [
+      '<xf numFmtId="0" fontId="' + f + '" fillId="' + fl + '" borderId="0" xfId="0" applyFont="1" applyFill="1"/>',
+      '<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+      '<xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+      '<xf numFmtId="0" fontId="' + (f + 1) + '" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+    ]);
+    return { xml: stylesXml, header: x, date: x + 1, money: x + 2, reported: x + 3 };
+  }
+
+  function detailSheetXml(detail, st) {
+    var headers = detail.headers.concat(['Reported on 1.02 form as']);
+    var last = headers.length - 1;
+    var moneyCol = headers.map(function (h) { return /^(amt|amount|tax\d*|total)$/i.test(h.replace(/\s/g, '')); });
+    var widths = headers.map(function (h) { return Math.max(8, h.length + 2); });
+    function cell(ref, v, style) {
+      var s = style ? ' s="' + style + '"' : '';
+      if (v instanceof Date) return '<c r="' + ref + '" s="' + st.date + '"><v>' + excelDate(v) + '</v></c>';
+      if (typeof v === 'number' && isFinite(v)) return '<c r="' + ref + '"' + s + '><v>' + v + '</v></c>';
+      if (v == null || v === '') return '';
+      return '<c r="' + ref + '"' + s + ' t="inlineStr"><is><t xml:space="preserve">' + esc(v) + '</t></is></c>';
+    }
+    var out = ['<row r="1">' + headers.map(function (h, c) { return cell(colName(c) + '1', h, st.header); }).join('') + '</row>'];
+    detail.rows.forEach(function (r, i) {
+      var n = i + 2, vals = r.cells.slice();
+      while (vals.length < last) vals.push(null);
+      vals.push(r.reportedAs);
+      out.push('<row r="' + n + '">' + vals.map(function (v, c) {
+        var len = v instanceof Date ? 10 : String(v == null ? '' : v).length + 2;
+        if (len > widths[c]) widths[c] = Math.min(len, 46);
+        var style = c === last ? (/^Not counted/.test(v) ? 0 : st.reported) : (typeof v === 'number' && moneyCol[c] ? st.money : 0);
+        return cell(colName(c) + n, v, style);
+      }).join('') + '</row>');
+    });
+    var cols = '<cols>' + widths.map(function (w, c) { return '<col min="' + (c + 1) + '" max="' + (c + 1) + '" width="' + w + '" customWidth="1"/>'; }).join('') + '</cols>';
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<dimension ref="A1:' + colName(last) + (detail.rows.length + 1) + '"/>' +
+      '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>' +
+      '<sheetFormatPr defaultRowHeight="14.5"/>' + cols + '<sheetData>' + out.join('') + '</sheetData>' +
+      '<pageMargins left="0.5" right="0.5" top="0.75" bottom="0.75" header="0.3" footer="0.3"/></worksheet>';
+  }
+
+  function addDetailSheet(zip, wbXml, detail) {
+    var names = ['[Content_Types].xml', 'xl/_rels/workbook.xml.rels', 'xl/styles.xml', 'docProps/app.xml'];
+    return Promise.all(names.map(function (n) { return zip.file(n) ? zip.file(n).async('string') : Promise.resolve(null); })).then(function (p) {
+      var ct = p[0], rels = p[1], styles = appendStyles(p[2]), app = p[3];
+      var num = 1; while (zip.file('xl/worksheets/sheet' + num + '.xml')) num++;
+      var rid = 'rIdTenantDetail';
+      var sheetId = 1; (wbXml.match(/sheetId="(\d+)"/g) || []).forEach(function (m) { sheetId = Math.max(sheetId, +m.match(/\d+/)[0] + 1); });
+
+      zip.file('xl/worksheets/sheet' + num + '.xml', detailSheetXml(detail, styles), NOFOLDERS);
+      zip.file('xl/styles.xml', styles.xml, NOFOLDERS);
+      zip.file('[Content_Types].xml', ct.replace('</Types>', '<Override PartName="/xl/worksheets/sheet' + num + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'), NOFOLDERS);
+      zip.file('xl/_rels/workbook.xml.rels', rels.replace('</Relationships>', '<Relationship Id="' + rid + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + num + '.xml"/></Relationships>'), NOFOLDERS);
+      if (app) {
+        app = app.replace(/(<vt:lpstr>Worksheets<\/vt:lpstr><\/vt:variant><vt:variant><vt:i4>)(\d+)/, function (_, a, n) { return a + (+n + 1); })
+                 .replace(/(<TitlesOfParts><vt:vector size=")(\d+)("[^>]*>)([\s\S]*?)(<\/vt:vector>)/, function (_, a, n, b, body, c) { return a + (+n + 1) + b + body + '<vt:lpstr>' + DETAIL_SHEET + '</vt:lpstr>' + c; });
+        zip.file('docProps/app.xml', app, NOFOLDERS);
+      }
+      return wbXml.replace('</sheets>', '<sheet name="' + DETAIL_SHEET + '" sheetId="' + sheetId + '" r:id="' + rid + '"/></sheets>');
+    });
+  }
+
   var tplCache = null;
   function loadTemplate() {
     if (!tplCache) tplCache = JSZip.loadAsync(root.TEMPLATE_B64, { base64: true }).then(function (z) {
@@ -426,9 +518,12 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         // Ask Excel to recalculate on open so the template's own formulas stay the source of truth.
         wbXml = wbXml.replace(/<calcPr([^>]*?)\s*\/>/, function (_, a) { return '<calcPr' + a.replace(/ fullCalcOnLoad="[^"]*"/, '') + ' fullCalcOnLoad="1"/>'; });
 
-        zip.file(path, xml);
-        zip.file('xl/workbook.xml', wbXml);
-        return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }).then(function (bytes) {
+        zip.file(path, xml, NOFOLDERS);
+        var withDetail = parsed.detail && parsed.detail.rows.length ? addDetailSheet(zip, wbXml, parsed.detail) : Promise.resolve(wbXml);
+        return withDetail.then(function (finalWbXml) {
+          zip.file('xl/workbook.xml', finalWbXml, NOFOLDERS);
+          return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+        }).then(function (bytes) {
           return { bytes: bytes, calc: calc };
         });
       });
@@ -471,13 +566,6 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     clearTimeout(toast.h); toast.h = setTimeout(function () { t.hidden = true; }, 3800);
   }
 
-  // ---- example shown before any file is loaded ----
-  function exampleFacility() {
-    var counts = { 2000: 31, 3000: 0, 3500: 0, 4000: 0, 5000: 14, 7500: 0, 10000: 4, 15000: 0, 20000: 2, 25000: 0 };
-    return { id: 'example', example: true, file: 'Example only · not real data', location: 'UNITS of Example Facility', year: 2026, month: 9,
-      parsed: { counts: counts, waiver: 0, totalPlans: 51, collected: 1125, skippedOther: 0, issues: [{ level: 'info', text: 'This is a sample so you can see the layout. Drop your exports above to replace it.' }] } };
-  }
-
   // ---- file intake ----
   var drop = $('drop'), input = $('file');
   drop.addEventListener('click', function () { input.click(); });
@@ -491,7 +579,6 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     var files = Array.prototype.slice.call(list || []);
     if (!files.length) return;
     if (typeof XLSX === 'undefined' || typeof JSZip === 'undefined') { toast('The spreadsheet tools did not load. Check your connection and reload the page.'); return; }
-    facilities = facilities.filter(function (f) { return !f.example; });
     var done = 0, added = 0, failed = [];
     files.forEach(function (file) {
       file.arrayBuffer().then(function (buf) {
@@ -533,7 +620,13 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
   function render() {
     var host = $('cards'); host.innerHTML = '';
-    var list = facilities.length ? facilities : [exampleFacility()];
+    var list = facilities;
+    if (!list.length) {
+      var empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.innerHTML = '<b>No reports loaded</b><span>Drop one or more Financial Charges exports above. Each facility appears here with its plan counts and its completed form.</span>';
+      host.appendChild(empty);
+    }
     var sumPlans = 0, sumDue = 0;
     var thisYear = new Date().getFullYear();
 
@@ -648,7 +741,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       .then(function () { btn.disabled = false; });
   });
 
-  $('clear').addEventListener('click', function () { facilities = []; render(); });
+  $('clear').addEventListener('click', function () { facilities = []; input.value = ''; render(); toast('All reports cleared.'); });
 
   // ---- boot ----
   render();
